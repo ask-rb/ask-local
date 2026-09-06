@@ -45,7 +45,8 @@ module Ask
         when "proxy" then SystemCommand.proxy(ctx, args)
         when "service" then SystemCommand.service(ctx, args)
         when "setup" then SystemCommand.setup(ctx, args)
-                when "kamal" then SystemCommand.kamal(ctx, args)
+        when "start" then SystemCommand.start(ctx, args)
+        when "kamal" then SystemCommand.kamal(ctx, args)
         when "stop"
           exit RoutesCommand.stop(ctx, args)
         when "restart" then RoutesCommand.restart(ctx, args)
