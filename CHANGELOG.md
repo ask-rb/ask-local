@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.1.1] — 2026-09-06
+
+Patch release focused on workstation setup, URL correctness, and proxy reliability.
+
+### Added — `ask-local setup` & `ask-local start`
+
+- `ask-local setup` — one-shot workstation setup for clean
+  `https://<app>.localhost` URLs: trust the local CA, serve port 443
+  (root launchd/systemd service when possible, sudo daemon otherwise),
+  sync `/etc/hosts`, and verify with `doctor`. Each step reports
+  `==>` / `ok` and the first failure aborts with the specific fix.
+- `ask-local start` — one-setup-and-go entry point: an idempotent
+  workstation-check-then-boot (`ask-local setup` if needed, then the
+  app). `ask-local` bare is an alias for it; `ask-local setup` stays for
+  explicit re-setup.
+- `askl` — shell-friendly alias binary (`bin/askl`, same entry point as
+  `bin/ask-local`). Keep `ask-local` in logs and docs so `grep` stays
+  useful.
+
+### Added — DNS-rebinding & log hygiene
+
+- DNS-rebinding boundary: foreign `Host` headers get a bare 404 naming
+  nothing; only hosts under our own configured TLDs see the route-listing
+  404. The proxy takes `--tld` (persisted to `proxy.tlds`) so the boundary
+  follows custom domains. The `X-Ask-Local: 1` health header marks our
+  proxy responses (including 404s) for the `ours?` probe.
+- Log rotation — `proxy.log` and per-app backend logs rotate at 5MB
+  (`ASK_LOCAL_LOG_MAX_BYTES`, one generation) before each write. A new
+  `doctor` disk-usage check warns past 100MB of state.
+
+### Fixed
+
+- **Silent `:1355` URL fallback removed.** Privileged-port (443) bind
+  failure is now a hard error pointing at `ask-local setup`, never a
+  booted app on `https://app.localhost:1355` that silently corrupts
+  downstream consumers of `ASK_LOCAL_URL`. The only port-suffixed URLs
+  are the ones you explicitly ask for (`proxy start -p 1355`).
+- **Health probe `130+?` hang fixed.** The TLS probe's `connect` sat
+  outside the timeout: a TLS handshake against a foreign plain-HTTP
+  server blocked in `connect` for 60s+. Connect is now inside the
+  timeout, plain HTTP is tried first (our proxy answers plain HTTP via
+  byte-peeking even on the TLS port), and any HTTP response without our
+  header short-circuits as foreign — only silent servers wait for the
+  timeout.
+- `start` dispatch was missing from the dispatcher despite being in
+  `SUBCOMMANDS`, so `ask-local start` fell through to `run_named` with
+  "start" as an app name. The kamal-help append drifted to a 6-space
+  indent. Both are fixed and pinned by tests.
+- `base64` declared as a runtime dependency (it left the default gems in
+  Ruby 3.4).
+- Missing `require "optparse"` lost in the CLI split.
+
+### Tests — new coverage for this patch
+
+- `start_test.rb` — help, fast-path vs. needs-setup branching, and the
+  non-interactive hard-error message.
+- `setup_test.rb` — four-step orchestration (all-steps-stubbed), first-failure
+  abort with fix text, `--no-service` flag, and the three `ensure_proxy!`
+  hard-error paths (non-interactive, foreign port, spawn failure) plus
+  explicit-port URL honesty and responding-foreign-server fast classification.
+- Pinned under `bundle exec rake test` (fast unit suite); no `test:e2e`
+  needed for these.
+
 ## [0.2.0] — Unreleased
 
 ### Changed
@@ -22,10 +85,11 @@
 - Root-owned `service install` (launchd/systemd) binding 80/443 at boot
   with the invoking user's state dir; sudo re-exec when needed.
 - All root write paths chown state back to the invoking user; `doctor`
-  reports an unwritable state dir plainly.
+  reports an unwritable state dir plainly. The privileged auto-start
+  re-execs under `sudo` with the correct state dir.
 - Bounded proxy concurrency (`ASK_LOCAL_MAX_CONNECTIONS`, 503 past the
-  cap), mtime-TTL route cache, IPv4+IPv6 loopback listeners, dual-stack
-  `ours?` health check.
+  cap), mtime-based route cache (no TTL race for boot-then-curl), IPv4+IPv6
+  loopback listeners, dual-stack `ours?` health check.
 - `get` inherits variant/TLD context from the current directory
   (`get backend` in a fix-ui worktree -> fix-ui.backend.localhost);
   `--service/--variant/--tld` overrides.
@@ -37,43 +101,12 @@
 - Ships the `ask-local` agent skill (ask/skills/ask-local/SKILL.md).
 - `test:e2e` / `test:all` rake tasks; CI matrix (3.2/3.3/3.4/4.0),
   macOS e2e leg, fixture-sweep job.
-- Ownership module: root write paths chown state back to the invoking
-  user; `doctor` reports an unwritable state dir with the fix.
-- Proxy hardening: bounded concurrency (503 past the cap), mtime-TTL
-  route cache, IPv4+IPv6 loopback listeners, dual-stack health check,
-  oversize-hostname refusal.
-- `status` (effective naming context), `open [name]`, `log -f`;
-  `stop` exit codes 0/2/3; `list` shows backend liveness.
-- Sinatra-modular + foreman-`$PORT` fixtures; no-double-injection guard.
-- SKILL.md "when NOT to use" section (CI, prod, Docker networks).
-- Framework coverage: hanami2 slice layout, jekyll livereload second
-  port (`--livereload-port` pinned next to the main port when
-  `livereload: true`), roda-plugins managed boot; no-double-injection
-  guard for explicit `$PORT`.
-- Chunked request uploads pinned by test (streamed intact,
-  close-delimited).
-- README non-goals section (HTTP/2, tunnels, production) with rationale.
-- `ask-local start`: one-setup-and-go entry point (setup-if-needed, then boot).
-  `ask-local` bare stays as an alias for it; `ask-local setup` stays for explicit re-setup.
-- `ask-local setup`: one-shot workstation setup (CA trust, port 443 via
-  root service or sudo daemon, hosts sync, doctor verify) with a clear
-  fix-it message on the first failure.
-- No silent port fallback: privileged bind failure is a hard error
-  pointing at `ask-local setup`, never a degraded `:1355` URL.
-- Health probe tries plain HTTP before TLS (a TLS handshake against a
-  foreign plain-HTTP server blocked in connect outside any timeout);
-  responding foreign servers classify instantly, silent ones after the
-  timeout rather than hanging forever.
-- DNS-rebinding boundary: foreign Hosts get a bare 404; only our own
-  TLDs see the route-listing 404. Proxy takes `--tld` (persisted) so the
-  boundary follows custom domains.
-- Log rotation (5MB, one generation) on proxy + backend logs; `doctor`
-  disk-usage check.
-- `--json` on list/status/doctor with stable keys; `status` sources made
-  explicit (no more `(from -)`).
-- Route cache keyed on file mtime (no TTL race for boot-then-curl);
-  foreground supervision polls at 2Hz with the detached-children
-  rationale documented.
+- Ownership module, framework fixtures (sinatra-modular,
+  foreman-`$PORT`, hanami2 slice layout, jekyll livereload), SKILL.md
+  "when NOT to use" section, README non-goals, vite/Shakapacker recipe.
+- Host authorization patterns default TLDs from `ASK_LOCAL_TLD`.
+- WebSocket Upgrade end-to-end test (RFC 6455 handshake + frame echo),
+  hop-loop 508 rejection, chunked framing, and spinning-loop fix.
 
 ### Fixed
 
@@ -92,9 +125,6 @@
 - Bidirectional streaming terminates promptly on `Connection: close`
   (each pump direction closes its peer on EOF).
 - `alias --remove` now appends the default TLD.
-- `base64` declared as a runtime dependency (left the default gems in
-  Ruby 3.4).
-- Missing `require "optparse"` lost in the CLI split.
 - Install generator `source_root` pointed at a doubled path; generator
   file checks now resolve against `destination_root`.
 - Port-flag injection no longer double-sets an explicit `$PORT`.
