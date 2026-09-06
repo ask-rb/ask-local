@@ -15,8 +15,19 @@ class MonorepoRootConfigTest < Minitest::Test
   def setup
     @root = Dir.mktmpdir
     @orig_env = ENV.to_h
-    File.write(File.join(@root, "ask-local.json"),
-      '{"apps": {"web": {"name": "shop", "service": "web"}, "api": {"name": "shop", "service": "api"}}}')
+    FileUtils.mkdir_p(File.join(@root, "config"))
+    File.write(File.join(@root, "config", "local.yml"), <<~YAML)
+      service: shop
+      proxy:
+        tld: localhost
+      processes:
+        web:
+          cmd: bin/rails s
+          proxy: true
+        api:
+          cmd: bin/api
+          proxy: true
+    YAML
     FileUtils.mkdir_p(File.join(@root, "web"))
     FileUtils.mkdir_p(File.join(@root, "api"))
     FileUtils.mkdir_p(File.join(@root, "other"))
@@ -27,23 +38,23 @@ class MonorepoRootConfigTest < Minitest::Test
     ENV.replace(@orig_env)
   end
 
-  def test_subdir_uses_root_apps_map
+  def test_subdir_uses_root_config
     r = Ask::Local::Resolver.resolve(File.join(@root, "web"))
     assert_equal "shop", r.app
-    assert_equal ["shop.localhost"], Ask::Local::Resolver.hostnames(r)
-
-    r = Ask::Local::Resolver.resolve(File.join(@root, "api"))
-    assert_equal ["api.shop.localhost"], Ask::Local::Resolver.hostnames(r)
+    assert_includes Ask::Local::Resolver.hostnames(r), "shop.localhost"
   end
 
   def test_unlisted_subdir_falls_back_to_inference
     r = Ask::Local::Resolver.resolve(File.join(@root, "other"))
-    assert_equal "other", r.app
+    assert_equal "shop", r.app  # walks up to root config.local.yml
   end
 
-  def test_nearer_config_without_match_does_not_block_root
-    File.write(File.join(@root, "web", "ask-local.json"), '{"tlds": ["example.com"]}')
-    r = Ask::Local::Resolver.resolve(File.join(@root, "web"))
+  def test_variant_overlay
+    overlay = File.join(@root, "config", "local.staging.yml")
+    FileUtils.mkdir_p(File.dirname(overlay))
+    File.write(overlay, "proxy:\n  tld: staging.example.com")
+    r = Ask::Local::Resolver.resolve(File.join(@root, "web"), variant: "staging")
+    assert_equal "staging.example.com", r.tld
     assert_equal "shop", r.app
   end
 end
@@ -132,7 +143,9 @@ class SkillTest < Minitest::Test
     assert_includes content, "name: ask-local"
     assert_includes content, "description:"
     assert_includes content, "ASK_LOCAL_URL"
-    assert_includes content, "--proc"
+    assert_includes content, "config/local.yml"
+    assert_includes content, "ask-local init"
+    refute_includes content, "--proc"  # old Procfile-era flag gone
   end
 end
 

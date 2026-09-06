@@ -1,89 +1,104 @@
 ---
 name: ask-local
-description: Run Ruby apps through ask-local for stable named .localhost URLs (e.g. https://myapp.localhost instead of http://localhost:3000). Use when booting dev servers (Rails, Rack, Roda, Sinatra, Jekyll, Procfile apps), wiring frontend to API, configuring OAuth callbacks or webhooks, debugging port conflicts, or working in git worktrees.
+description: Run Ruby apps through ask-local for stable named .localhost URLs (e.g. https://myapp.localhost instead of http://localhost:3000). Use when booting dev servers (Rails, Rack, Roda, Sinatra, Jekyll), wiring frontend to API, configuring OAuth callbacks or webhooks, debugging port conflicts, or working in git worktrees.
 ---
 
 # Local Dev with ask-local
 
 Never invent ports. Never parse them from logs. Every app has a stable URL.
 
-First time on a machine, run `ask-local start` in any app dir — it does
-the one-shot CA trust, port 443, and hosts sync if anything is missing,
-then boots. Prefer `ask-local setup` for
-workstation setup without booting. Every later `ask-local` or
-hosts, verify). If any command fails with a privileged-port error, do
-not work around it with `-p` — run `ask-local setup` instead. A `:port`
-suffix in a URL means someone explicitly opted into it.
+## One file, one command
 
-## Booting apps
+Every app declares `config/local.yml` — the single source of truth:
 
-```bash
-ask-local                        # infer name, boot -> https://<app>.localhost
-ask-local --service api          # -> https://api.myapp.localhost
-ask-local run -- bin/dev         # Procfile apps, PORT injected
-ask-local run --proc worker      # boot a specific Procfile process
+```yaml
+service: myapp
+proxy:
+  tld: localhost
+processes:
+  web:
+    cmd: bundle exec puma -b tcp://127.0.0.1:$PORT config.ru
+    proxy: true          # gets https://myapp.localhost
+  worker:
+    cmd: bundle exec sidekiq
+    proxy: false         # background, supervised, no URL
+env:
+  clear:
+    RAILS_ENV: development
 ```
 
-Managed apps are supervised by the proxy daemon: they idle-stop after 15
-minutes (`ASK_LOCAL_IDLE_TIMEOUT`), stop when `tmp/restart.txt` is
-touched, and boot again on the next request.
-
-## Lifecycle
+If the file is missing, ask-local prints `Run ask-local init`. Generate it
+with `ask-local init` (migrates an existing Procfile) or in Rails via
+`rails generate ask_local:install`.
 
 ```bash
-ask-local stop                   # stop this app's backend + routes
-ask-local restart                # touch tmp/restart.txt (supervised reboot)
-ask-local log [n]                # tail this app's backend log
+ask-local start          # setup if needed, then boot every process
+ask-local                # same as start
+ask-local stop           # stop this app's backend + routes
+ask-local status         # show service, processes, and URLs
+ask-local log [-f]       # tail the web process log
 ```
 
-The runner injects `ASK_LOCAL_URL`, `PORT`, and `HOST=127.0.0.1` into the
-child. In Rails, read it via `Ask::Local::Rails.url` — never hardcode
-`localhost:3000`.
+`$PORT` and `ASK_LOCAL_URL` are injected per process; HTTP processes get
+stable URLs, background ones are supervised without routes. A process
+that exits cleans up the whole tree.
 
 ## Cross-service wiring
 
 ```bash
 ask-local get backend            # -> https://backend.localhost
+ask-local get backend --variant demo
 ```
 
 Use `get` output for frontend-to-API URLs, Cable URLs, and webhook
 targets. Do not guess ports.
 
-## Variants (worktrees, branches, demos)
+## Variants are files
 
-Hostnames compose as `{variant}.{service}.{app}.{tld}`. Linked worktrees
-get a branch prefix automatically (`fix-ui.myapp.localhost`); main keeps
-the bare name. Override with `--variant` or `ASK_LOCAL_VARIANT`.
+A variant is a file overlay, Kamal-style: `config/local.<variant>.yml`
+deep-merges over `config/local.yml`. Select it with `ASK_LOCAL_VARIANT`
+or `--variant`. Worktrees get a branch prefix automatically.
+
+```bash
+ASK_LOCAL_VARIANT=fix-ui ask-local    # boots with config/local.fix-ui.yml merged
+```
+
+## First time on a machine
+
+Run `ask-local start` — it does the one-shot CA trust, port 443, and
+hosts sync if anything is missing, then boots. Prefer `ask-local setup`
+for workstation setup without booting. If any command fails with a
+privileged-port error, do not work around it with `-p` — run
+`ask-local setup` instead. A `:port` suffix in a URL means someone
+explicitly opted into it.
 
 ## OAuth and webhooks
 
-Build callback URLs from `ASK_LOCAL_URL`:
+Build callback URLs from `ASK_LOCAL_URL` (injected into every HTTP
+process):
 
 ```ruby
 callback = "#{Ask::Local::Rails.url}/auth/google/callback"
 ```
 
 Strict providers (Google, Apple) reject `.localhost`. Serve the app on a
-domain you own instead — no code change:
+domain you own instead — no code change, just config:
 
-```bash
-ask-local --tld local.example.com   # -> https://myapp.local.example.com
+```yaml
+proxy:
+  host: myapp.local.example.com   # instead of tld: localhost
 ```
 
 ## Troubleshooting
 
 ```bash
 ask-local doctor                 # read-only: proxy, routes, DNS, CA trust
-ask-local list                   # active routes
+ask-local list --json            # routes as stable JSON
 ask-local prune                  # clear stale routes from crashed sessions
 ```
 
-Prefer `list --json`, `status --json`, and `doctor --json` when parsing
-output programmatically — stable keys, no prose scraping.
-
 If a hostname does not resolve: `ask-local hosts sync`. If the browser
-warns about TLS: `ask-local trust`. Never run dev servers on bare ports
-alongside ask-local — they bypass routing and reintroduce conflicts.
+warns about TLS: `ask-local trust`.
 
 ## When NOT to use ask-local
 

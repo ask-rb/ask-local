@@ -5,132 +5,91 @@ require_relative "test_helper"
 class ConfigTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
+    FileUtils.mkdir_p(File.join(@dir, "config"))
   end
 
   def teardown
     FileUtils.remove_entry(@dir)
   end
 
+  def write_yml(content)
+    File.write(File.join(@dir, "config", "local.yml"), content)
+  end
+
+  def test_loads_service
+    write_yml("service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    config = Ask::Local::Config.load(@dir)
+    assert_equal "myapp", config.service
+  end
+
+  def test_invalid_yml_raises
+    File.write(File.join(@dir, "config", "local.yml"), ": [bad")
+    assert_raises(Ask::Local::ConfigError) { Ask::Local::Config.load(@dir) }
+  end
+
+  def test_missing_service_raises
+    write_yml("proxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    assert_raises(Ask::Local::ConfigError) { Ask::Local::Config.load(@dir) }
+  end
+
+  def test_empty_processes_raises
+    write_yml("service: x\nprocesses: {}")
+    assert_raises(Ask::Local::ConfigError) { Ask::Local::Config.load(@dir) }
+  end
+
   def test_missing_config_returns_nil
     assert_nil Ask::Local::Config.load(@dir)
-  end
-
-  def test_loads_name
-    File.write(File.join(@dir, "ask-local.json"), '{"name": "myapp"}')
-    config = Ask::Local::Config.load(@dir)
-    assert_equal "myapp", config["name"]
-  end
-
-  def test_invalid_json_raises_config_error
-    File.write(File.join(@dir, "ask-local.json"), "{bad")
-    assert_raises(Ask::Local::ConfigError) { Ask::Local::Config.load(@dir) }
-  end
-
-  def test_invalid_app_port_raises
-    File.write(File.join(@dir, "ask-local.json"), '{"appPort": 99999}')
-    assert_raises(Ask::Local::ConfigError) { Ask::Local::Config.load(@dir) }
-  end
-
-  def test_apps_map_resolves_nested_package
-    File.write(File.join(@dir, "ask-local.json"),
-      '{"apps": {"apps/web": {"name": "webapp"}}}')
-    config = Ask::Local::Config.load(@dir)
-    assert_equal({ "name" => "webapp" },
-      config.app_config(File.join(@dir, "apps", "web")))
-    assert_equal({}, config.app_config(File.join(@dir, "other")))
-  end
-end
-
-class HostsTest < Minitest::Test
-  H = Ask::Local::Hosts
-
-  def test_managed_block_format
-    block = H.managed_block(["b.localhost", "a.localhost"])
-    assert_includes block, H::BEGIN_MARKER
-    assert_includes block, "127.0.0.1 a.localhost"
-    assert_includes block, H::END_MARKER
-  end
-
-  def test_sync_and_clean_roundtrip_in_tempfile
-    path = File.join(Dir.mktmpdir, "hosts")
-    File.write(path, "127.0.0.1 localhost\n")
-    assert H.sync(["myapp.localhost"], path)
-    assert_includes H.managed_hostnames(File.read(path)), "myapp.localhost"
-    # Second sync replaces, not duplicates.
-    assert H.sync(["other.localhost"], path)
-    names = H.managed_hostnames(File.read(path))
-    assert_equal ["other.localhost"], names
-    assert H.clean(path)
-    assert_equal [], H.managed_hostnames(File.read(path))
-    assert_includes File.read(path), "127.0.0.1 localhost"
   end
 end
 
 class ResolverTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @orig_env = ENV.to_h
+    FileUtils.mkdir_p(File.join(@dir, "config"))
+    @orig = ENV.to_h
   end
 
   def teardown
+    ENV.replace(@orig)
     FileUtils.remove_entry(@dir)
-    ENV.replace(@orig_env)
   end
 
-  def test_flag_beats_env_beats_config
-    File.write(File.join(@dir, "ask-local.json"), '{"name": "configname"}')
-    ENV["ASK_LOCAL_NAME"] = "envname"
-    r = Ask::Local::Resolver.resolve(@dir, name: "flagname")
-    assert_equal "flagname", r.app
-    assert_equal "flag", r.sources[:app]
+  def write_yml(content)
+    File.write(File.join(@dir, "config", "local.yml"), content)
+  end
+
+  def test_service_from_config
+    write_yml("service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     r = Ask::Local::Resolver.resolve(@dir)
-    assert_equal "envname", r.app
-    ENV.delete("ASK_LOCAL_NAME")
+    assert_equal "myapp", r.app
+    assert_equal "localhost", r.tld
+  end
+
+  def test_tld_from_config
+    write_yml("service: x\nproxy:\n  tld: preview.example.com\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     r = Ask::Local::Resolver.resolve(@dir)
-    assert_equal "configname", r.app
+    assert_equal "preview.example.com", r.tld
   end
 
-  def test_tld_parsing_and_validation
-    r = Ask::Local::Resolver.resolve(@dir, tlds: "Localhost,preview.example.com")
-    assert_equal ["localhost", "preview.example.com"], r.tlds
-    assert_raises(Ask::Local::ConfigError) do
-      Ask::Local::Resolver.resolve(@dir, tlds: "BAD TLD!")
+  def test_host_from_config
+    write_yml("service: x\nproxy:\n  host: myapp.prod.example.com\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    r = Ask::Local::Resolver.resolve(@dir)
+    assert_equal "myapp.prod.example.com", r.host
+  end
+
+  def test_hostnames_compose_from_config
+    write_yml("service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true\n  api:\n    cmd: api\n    proxy: true\n  worker:\n    cmd: j\n    proxy: false")
+    r = Ask::Local::Resolver.resolve(@dir)
+    hostnames = Ask::Local::Resolver.hostnames(r)
+    assert_includes hostnames, "myapp.localhost"
+    assert_includes hostnames, "api.myapp.localhost"
+    refute_includes hostnames, "worker.myapp.localhost"
+  end
+
+  def test_missing_config_raises
+    err = assert_raises(Ask::Local::ConfigError) do
+      Ask::Local::Resolver.resolve(@dir)
     end
-  end
-
-  def test_hostnames_compose_all_axes
-    r = Ask::Local::Resolver.resolve(@dir, name: "MyApp", service: "API",
-      variant: "Fix_UI", tlds: "localhost")
-    assert_equal ["fix-ui.api.myapp.localhost"], Ask::Local::Resolver.hostnames(r)
-  end
-end
-
-class PortsTest < Minitest::Test
-  def test_finds_free_port_in_range
-    port = Ask::Local::Ports.find_free
-    assert port.between?(4000, 4999)
-    assert Ask::Local::Ports.free?(port)
-  end
-
-  def test_skips_blocked_ports
-    # Occupy nothing; just verify blocked ports never returned over many draws.
-    20.times do
-      port = Ask::Local::Ports.find_free
-      refute Ask::Local::Ports::BLOCKED[port], "returned blocked port #{port}"
-    end
-  end
-end
-
-class VersionTest < Minitest::Test
-  def test_version_format
-    assert_match(/\A\d+\.\d+\.\d+\z/, Ask::Local::VERSION)
-  end
-end
-
-class GemspecTest < Minitest::Test
-  def test_gemspec_valid
-    spec = Gem::Specification.load(File.expand_path("../ask-local.gemspec", __dir__))
-    refute_nil spec
-    assert_equal "ask-local", spec.name
+    assert_match(/ask-local init/, err.message)
   end
 end

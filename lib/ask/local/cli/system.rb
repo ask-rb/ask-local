@@ -263,16 +263,72 @@ module Ask
           end
         end
 
-        # One-shot workstation setup: everything needed for clean
-        # https://<app>.localhost URLs, in order, with a clear fix-it
-        # message on the first failure. Run this once per machine:
-        #
-        #   ask-local setup
-        #
-        # Steps: trust the local CA -> ensure the proxy serves port 443
-        # (root service when possible, sudo daemon otherwise) -> sync
-        # /etc/hosts -> verify with doctor. After this, plain `ask-local`
-        # in any app dir just works with no :port suffix, ever.
+
+        def init(ctx, _args)
+          config_path = File.join(Dir.pwd, Config::RELATIVE_PATH)
+          if File.file?(config_path)
+            $stderr.puts "config/local.yml already exists at #{config_path}"
+            return
+          end
+          FileUtils.mkdir_p(File.join(Dir.pwd, Config::RELATIVE_DIR))
+
+          # Migrate Procfile.dev / Procfile if present.
+          procfile = Ask::Local::Procfile.find_file(Dir.pwd)
+          service = Ask::Local::Sanitize.hostname_label(File.basename(Dir.pwd))
+
+          process_lines = []
+          if procfile
+            lines = Ask::Local::Procfile.parse_file(procfile)
+            lines.each do |l|
+              type = Ask::Local::Procfile.classify(l.name) == :background ? "false" : "true"
+              process_lines << "    #{l.name}:"
+              process_lines << "      cmd: #{l.command}"
+              process_lines << "      proxy: #{type}"
+              process_lines << "      # NOTE: compound line - run explicitly" if l.compound
+            end
+          else
+            # Default: a single web process. Detect Rails (Gemfile with
+            # rails) vs plain Rack (config.ru) and pick the right boot.
+            has_rails = File.file?(File.join(Dir.pwd, "Gemfile")) &&
+              File.read(File.join(Dir.pwd, "Gemfile")).match?(/gem ["']rails["']/)
+            cmd =
+              if has_rails
+                "bundle exec puma -b tcp://127.0.0.1:$PORT config.ru"
+              elsif File.file?(File.join(Dir.pwd, "config.ru"))
+                "puma -b tcp://127.0.0.1:$PORT config.ru"
+              else
+                "bin/rails server -p $PORT"
+              end
+            process_lines << "    web:"
+            process_lines << "      cmd: #{cmd}"
+            process_lines << "      proxy: true"
+          end
+
+          content = <<~YAML
+            # config/local.yml — ask-local configuration (Kamal-style).
+            # This is the only source of truth. Run `ask-local` to boot everything.
+            # Overlay variants with config/local.<variant>.yml.
+
+            service: #{service}
+
+            proxy:
+              tld: localhost
+
+            processes:
+          #{process_lines.join("\n")}
+
+            env:
+              clear:
+                RAILS_ENV: development
+          YAML
+          File.write(config_path, content)
+          puts "Created #{config_path}"
+          puts "  service: #{service}"
+          puts "  processes from: #{procfile || 'defaults'}"
+          puts "Run `ask-local start` to boot."
+        end
+
+
         def setup(ctx, args)
           if args.include?("--help") || args.include?("-h")
             puts <<~HELP
@@ -492,7 +548,7 @@ module Ask
           raise Error, "Usage: ask-local kamal <variant> [--app myapp] [--domain preview.example.com] [--tld <tld>]" unless variant
           tld = opts[:tld] || ENV["ASK_LOCAL_TLD"]&.split(",")&.first || "localhost"
 
-          app = opts[:app] || Resolver.resolve(Dir.pwd, use_branch: false).app
+          app = opts[:app] || Resolver.resolve(Dir.pwd).app
           domain = opts[:domain] || ENV["ASK_LOCAL_KAMAL_DOMAIN"] || "preview.example.com"
           slug = Sanitize.hostname_label(variant)
           puts "# Paste into deploy.yml proxy section for a preview of variant #{slug}:"

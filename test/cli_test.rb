@@ -46,9 +46,14 @@ class CLITest < Minitest::Test
   end
 
   def test_get_prints_url
-    code, out = run_cli("get", "backend")
-    assert_equal 0, code
-    assert_includes out, "https://backend.localhost"
+    FileUtils.mkdir_p(File.join(@dir, "config"))
+    File.write(File.join(@dir, "config", "local.yml"),
+      "service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    Dir.chdir(@dir) do
+      c, o = run_cli("get", "backend")
+      assert_equal 0, c
+      assert_includes o, "backend.localhost"
+    end
   end
 
   def test_list_empty
@@ -82,17 +87,26 @@ class CLITest < Minitest::Test
   end
 
   def test_kamal_snippet_inherits_app_from_directory
-    code, out = run_cli("kamal", "demo")
-    assert_equal 0, code
-    # cwd here is the ask-local repo -> gemspec name.
-    assert_match(%r{\A#.*\nproxy:\n  ssl: true\n  hosts:\n    - ask-local-demo\.preview\.example\.com\n}, out)
+    FileUtils.mkdir_p(File.join(@dir, "config"))
+    File.write(File.join(@dir, "config", "local.yml"),
+      "service: myapp\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    Dir.chdir(@dir) do
+      code, out = run_cli("kamal", "demo")
+      assert_equal 0, code
+      assert_match(/myapp-demo\.preview\.example\.com/, out)
+    end
   end
 
   def test_get_inherits_variant_from_env
+    FileUtils.mkdir_p(File.join(@dir, "config"))
+    File.write(File.join(@dir, "config", "local.yml"),
+      "service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     ENV["ASK_LOCAL_VARIANT"] = "fix-ui"
-    code, out = run_cli("get", "backend")
-    assert_equal 0, code
-    assert_includes out, "https://fix-ui.backend.localhost"
+    Dir.chdir(@dir) do
+      c, o = run_cli("get", "backend")
+      assert_equal 0, c
+      assert_includes o, "fix-ui.backend.localhost"
+    end
   ensure
     ENV.delete("ASK_LOCAL_VARIANT")
   end

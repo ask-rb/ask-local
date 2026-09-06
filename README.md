@@ -28,14 +28,33 @@ The only port-suffixed URLs are the ones you explicitly ask for:
 `ask-local proxy start -p 1355` (CI/sandboxes where 443 is impossible).
 There the suffix is honest, and `ASK_LOCAL_URL` carries it faithfully.
 
-## How it works
+## The one-file model
 
-1. `ask-local` infers your app name (Rails module, gemspec,
-   `package.json`, git root, or directory) and boots it — managed Rack
-   apps on a unix socket (zero TCP ports), anything else via `PORT`.
-2. Registers `hostname -> backend -> pid` in `~/.ask-local/routes.json`.
-3. The reverse proxy (HTTPS on 443, per-host certs from a local CA)
-   routes by `Host` header to your app.
+Every app declares `config/local.yml` (Kamal-style) — the single source
+of truth for service name, proxy TLD/host, processes, and env:
+
+```yaml
+service: myapp
+proxy:
+  tld: localhost
+processes:
+  web:
+    cmd: bundle exec puma -b tcp://127.0.0.1:$PORT config.ru
+    proxy: true
+  worker:
+    cmd: bundle exec sidekiq
+    proxy: false
+```
+
+`ask-local init` creates the file (migrating an existing Procfile);
+Rails apps get it via `rails generate ask_local:install`. `ask-local`
+then boots every process, assigns each a `$PORT`, injects
+`ASK_LOCAL_URL`, registers routes for HTTP processes, supervises the
+whole tree, and cleans up when one exits.
+
+Variants are file overlays: `config/local.<variant>.yml` deep-merges on
+top of `config/local.yml`, selected by `ASK_LOCAL_VARIANT` (Kamal's
+destination pattern).
 
 `.localhost` resolves to loopback natively in Chrome, Firefox, and Edge —
 no DNS server, no `/etc/resolver`. Safari may need `ask-local hosts sync`.

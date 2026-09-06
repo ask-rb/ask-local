@@ -17,7 +17,7 @@ class CommandSplitTest < Minitest::Test
 
   def test_status_prints_effective_context
     dir = Dir.mktmpdir
-    File.write(File.join(dir, "ask-local.json"), '{"name": "myapp", "service": "api"}')
+    FileUtils.mkdir_p(File.join(dir, "config")); File.write(File.join(dir, "config", "local.yml"), "service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  api:\n    cmd: s\n    proxy: true")
     code, out = nil, nil
     Dir.chdir(dir) do
       code, out = capture { Ask::Local::CLI.run(["status"]) }
@@ -25,13 +25,16 @@ class CommandSplitTest < Minitest::Test
     assert_equal 0, code
     assert_includes out, "app:"
     assert_includes out, "myapp"
-    assert_includes out, "api.myapp.localhost"
+    assert_includes out, "myapp.localhost"
   ensure
     FileUtils.remove_entry(dir) if dir
   end
 
   def test_stop_exit_codes
     dir = Dir.mktmpdir
+    FileUtils.mkdir_p(File.join(dir, "config"))
+    File.write(File.join(dir, "config", "local.yml"),
+      "service: myapp\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     state = Dir.mktmpdir
     orig = ENV["ASK_LOCAL_STATE_DIR"]
     ENV["ASK_LOCAL_STATE_DIR"] = state

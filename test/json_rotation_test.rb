@@ -49,6 +49,9 @@ class JsonOutputTest < Minitest::Test
 
   def test_status_json_explicit_nils
     app_dir = Dir.mktmpdir
+    FileUtils.mkdir_p(File.join(app_dir, "config"))
+    File.write(File.join(app_dir, "config", "local.yml"),
+      "service: myapp\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     code, out = nil, nil
     Dir.chdir(app_dir) do
       code, out = run_cli("status", "--json")
@@ -57,7 +60,7 @@ class JsonOutputTest < Minitest::Test
     parsed = JSON.parse(out)
     assert_nil parsed["variant"]
     assert_nil parsed["variant_source"]
-    assert_equal File.basename(app_dir).downcase.gsub(/[^a-z0-9-]/, "-"), parsed["app"]
+    assert_equal "myapp", parsed["app"]
     assert parsed.key?("framework")
   ensure
     FileUtils.remove_entry(app_dir) if app_dir
@@ -65,12 +68,15 @@ class JsonOutputTest < Minitest::Test
 
   def test_status_prose_no_dash_source
     app_dir = Dir.mktmpdir
+    FileUtils.mkdir_p(File.join(app_dir, "config"))
+    File.write(File.join(app_dir, "config", "local.yml"),
+      "service: myapp\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     _code, out = nil, nil
     Dir.chdir(app_dir) do
       _code, out = run_cli("status")
     end
     refute_includes out, "(from -)"
-    assert_includes out, "no worktree"
+    assert_includes out, "variant:"
   ensure
     FileUtils.remove_entry(app_dir) if app_dir
   end

@@ -3,109 +3,140 @@
 module Ask
   module Local
     class CLI
-      # Boot commands: bare `ask-local`, `run`, and `<name> <cmd>`.
-      # Owns managed/run boot orchestration, Procfile resolution, and the
-      # foreground supervision loop.
+      # Boot commands: `ask-local`, `ask-local start`, `ask-local run`.
+      # The config file is mandatory — missing file prints the fix and exits.
+      # `boot_all` fans out over every process declared in config/local.yml.
+      # No inference, no Procfile at boot, no single-process default.
       module BootCommand
-        # Frameworks that ignore $PORT get explicit flags (portless lesson:
-        # Vite/Astro/Expo need --port; Jekyll/Middleman/Bridgetown do too).
-        # Only injects when the user hasn't already set a port.
         PORT_IGNORING = %w[jekyll middleman bridgetown].freeze
 
         module_function
 
+        # Bare `ask-local` / `ask-local start` / `ask-local run`.
+        # Reads config/local.yml via the resolver, ensures the proxy,
+        # boots every process, supervises the tree, cleans up on exit.
         def run_inferred(ctx, args)
-          opts = ctx.parse_flags(args, %i[name service variant tld branch proc force])
-          resolved = Resolver.resolve(Dir.pwd, name: opts[:name],
-            service: opts[:service], variant: opts[:variant],
-            tlds: opts[:tld], use_branch: opts[:branch])
-          hostnames = Resolver.hostnames(resolved)
+          variant = ENV["ASK_LOCAL_VARIANT"]
+          opts = ctx.parse_flags(args, %i[variant tld force])
+          resolved = resolve!(ctx, variant: opts[:variant] || variant, tld: opts[:tld])
           ensure_proxy!(ctx)
-          framework = Framework.detect(Dir.pwd)
-          runner = Runner.new(store: ctx.store)
-          if Framework.managed?(framework) && opts[:rest].empty?
-            boot_managed(ctx, runner, resolved, hostnames, opts)
-          else
-            command = opts[:rest].empty? ? default_command(framework, opts[:proc]) : opts[:rest]
-            boot_run(ctx, runner, resolved, hostnames, command, opts)
-          end
+          boot_all(ctx, resolved, opts)
         end
 
         def run_explicit(ctx, args)
-          opts = ctx.parse_flags(args, %i[name service variant tld branch proc force])
-          resolved = Resolver.resolve(Dir.pwd, name: opts[:name],
-            service: opts[:service], variant: opts[:variant],
-            tlds: opts[:tld], use_branch: opts[:branch])
-          hostnames = Resolver.hostnames(resolved)
-          ensure_proxy!(ctx)
-          framework = Framework.detect(Dir.pwd)
-          command = opts[:rest].empty? ? default_command(framework, opts[:proc]) : opts[:rest]
-          boot_run(ctx, Runner.new(store: ctx.store), resolved, hostnames, command, opts)
+          run_inferred(ctx, args)
         end
 
-        def run_named(ctx, name, args)
-          opts = ctx.parse_flags(args, %i[force app_port])
-          resolved = Resolver.resolve(Dir.pwd, name: name)
-          hostnames = Resolver.hostnames(resolved)
-          ensure_proxy!(ctx)
-          if opts[:rest].empty?
-            $stderr.puts "Error: no command given for #{name}."
+        def run_named(ctx, name, _args)
+          $stderr.puts "Error: `ask-local #{name}` is no longer supported."
+          $stderr.puts "  All processes come from config/local.yml. Run `ask-local init` to create one."
+          exit 1
+        end
+
+        # Core boot loop: iterate processes from config/local.yml,
+        # classify HTTP vs background, spawn each, register routes for
+        # HTTP processes, then supervise the tree.
+        def boot_all(ctx, resolved, opts)
+          service = resolved.app
+          tld = resolved.tld
+          host = resolved.host
+          processes = resolved.processes
+
+          if processes.empty?
+            $stderr.puts "Error: no processes in config/local.yml. Add at least one."
             exit 1
           end
-          boot_run(ctx, Runner.new(store: ctx.store), resolved, hostnames, opts[:rest], opts)
-        end
 
-        def boot_managed(ctx, runner, resolved, hostnames, opts)
-          primary = hostnames.first
-          url = Hostname.url(primary, port: ctx.proxy_port, tls: ctx.proxy_tls)
-          puts "ask-local"
-          puts "-- #{hostnames.join(", ")}"
-          app = runner.boot_managed(name: resolved.app, hostname: primary,
-            url: url, dir: Dir.pwd, force: opts[:force])
-          register_all(ctx, hostnames, app, force: opts[:force], spec: { "dir" => File.expand_path(Dir.pwd) })
-          puts "\n  -> #{url}\n"
-          ctx.report_unresolved(hostnames)
-          trap_cleanup(ctx, hostnames)
-          supervise_backend(ctx, hostnames, app)
-        end
-
-        def boot_run(ctx, runner, resolved, hostnames, command, opts)
-          primary = hostnames.first
-          url = Hostname.url(primary, port: ctx.proxy_port, tls: ctx.proxy_tls)
-          puts "ask-local"
-          puts "-- #{hostnames.join(", ")}"
-          port = opts[:app_port] || Ports.find_free
-          command = inject_port_flags(command, port)
-          app = runner.boot_run(name: resolved.app, hostname: primary, url: url,
-            dir: Dir.pwd, command: command, port: port, force: opts[:force])
-          register_all(ctx, hostnames, app, force: opts[:force])
-          puts "\n  -> #{url}\n"
-          puts "Running: PORT=#{app.target.split(":").last} ASK_LOCAL_URL=#{url} #{command.join(" ")}"
-          ctx.report_unresolved(hostnames)
-          trap_cleanup(ctx, hostnames)
-          supervise_backend(ctx, hostnames, app)
-        end
-
-        # Foreground loop: exit (cleaning up) when the backend dies, so a
-        # crashed app never leaves a stale route behind. Backends are
-        # spawned detached (so Ctrl+C in the CLI never SIGINTs the app),
-        # which rules out Process.wait — detached children are already
-        # reaped. Poll liveness at 2Hz: prompt enough for crash cleanup
-        # without spinning.
-        def supervise_backend(ctx, hostnames, app)
-          until !ProxyControl.pid_alive?(app.pid)
-            sleep 0.5
+          primary = Resolver.primary_proc(resolved)
+          if primary.nil?
+            $stderr.puts "Error: no HTTP process (proxy: true) found in config/local.yml."
+            exit 1
           end
-          puts "\nBackend exited — cleaning up."
-          cleanup_routes(ctx, hostnames)
-          exit 0
+
+          runner = Runner.new(store: ctx.store)
+          children = []
+          routes_registered = []
+
+          puts "ask-local (#{service})"
+          puts "--"
+
+          processes.each do |proc_name, entry|
+            next if entry["proxy"] == false
+
+            hostname = Resolver.hostname_for(resolved, proc_name)
+            next unless hostname
+
+            url = Hostname.url(hostname, port: ctx.proxy_port, tls: ctx.proxy_tls)
+            hostnames = [hostname]
+            puts "  [#{proc_name}] #{url}"
+
+            # Each process cmd runs through the shell so $PORT (and other
+            # env refs) expand — same trust boundary as a Procfile line
+            # (repo code, not user input). Compound lines are refused.
+            cmd = entry["cmd"].to_s
+            if cmd.match?(Ask::Local::Procfile::COMPOUND)
+              $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: ask-local run -- #{cmd}"
+              next
+            end
+
+            port = opts[:app_port] || Ports.find_free
+            shell_cmd = ["sh", "-c", cmd]
+            app = runner.boot_run(name: proc_name, hostname: hostname, url: url,
+              dir: Dir.pwd, command: shell_cmd, port: port, force: opts[:force])
+            register_all(ctx, hostnames, app, force: opts[:force],
+              spec: { "dir" => File.expand_path(Dir.pwd), "proc" => proc_name })
+            routes_registered << { hostnames: hostnames, app: app }
+
+            puts "  -> #{url}"
+          end
+
+          background = processes.select { |_, v| v["proxy"] == false }
+          unless background.empty?
+            puts "  [background] #{background.keys.join(', ')}"
+          end
+
+          puts
+          ctx.report_unresolved(routes_registered.flat_map { |r| r[:hostnames] })
+
+          # Supervisor: exit when ANY child dies (loud cleanup).
+          all_pids = routes_registered.map { |r| r[:app].pid }
+          trap_cleanup(ctx, routes_registered.flat_map { |r| r[:hostnames] }, all_pids)
+          supervise_tree(ctx, routes_registered.flat_map { |r| r[:hostnames] }, all_pids)
+        end
+
+        def build_env(ctx, resolved, entry)
+          env = {}
+          # Merge config env.clear
+          config_env = resolved.secrets || {}
+          entry_env = entry["env"] || {}
+          (entry_env["clear"] || {}).each { |k, v| env[k] = v }
+          # Merge secrets from config/local.secrets
+          secret_keys = entry_env["secret"] || []
+          secret_keys.each do |k|
+            env[k] = config_env[k] if config_env.key?(k)
+          end
+          # Host env (dotenv from .env) already in ENV
+          env
+        end
+
+        def supervise_tree(ctx, hostnames, pids)
+          loop do
+            sleep 0.5
+            if pids.any? { |pid| !ProxyControl.pid_alive?(pid) }
+              puts "\nA process exited — cleaning up all routes."
+              cleanup_routes(ctx, hostnames)
+              # Kill remaining children
+              pids.each do |pid|
+                Process.kill("TERM", pid) rescue nil
+              end
+              exit 0
+            end
+          end
         end
 
         def inject_port_flags(command, port)
           return command if command.empty?
           return command if command.any? { |a| a.match?(/\A(-p|--port)(=|\z)/) }
-          # A literal $PORT already present (e.g. Procfile `web: x --port $PORT`,
-          # foreman --port passthrough): injecting again would double-set it.
           return command if command.any? { |a| a.include?("$PORT") }
 
           bin = File.basename(command.first.to_s)
@@ -113,85 +144,33 @@ module Ask
             (command.length > 2 && PORT_IGNORING.include?(File.basename(command[2].to_s)))
           return command unless needs_flags
 
-          flags = ["--port", port.to_s, "--host", "127.0.0.1"]
-          flags.concat(jekyll_livereload_flags(port)) if jekyll_command?(command)
-          command + flags
+          command + ["--port", port.to_s, "--host", "127.0.0.1"]
         end
 
-        # Jekyll's livereload runs its own server on a second port
-        # (default 35729) serving the livereload.js WebSocket. It cannot go
-        # through the proxy (one route = one backend), so pin it next to the
-        # main port and document the direct URL. Only when the app enables
-        # livereload in _config.yml; explicit user flags always win.
-        JEKYLL_LIVERELOAD_DEFAULT_PORT = 35_729
-
-        def jekyll_command?(command)
-          command.any? { |a| File.basename(a.to_s) == "jekyll" }
-        end
-
-        def jekyll_livereload_flags(port)
-          return [] unless File.file?("_config.yml")
-          return [] unless File.read("_config.yml").match?(/^\s*livereload:\s*true/i)
-          return [] if port + 1 > Ports::MAX_PORT
-
-          ["--livereload-port", (port + 1).to_s]
-        rescue SystemCallError
-          []
-        end
-
-        def default_command(framework, proc_name = nil)
-          case framework
-          when :procfile
-            procfile_command(proc_name) || raise(Error,
-              proc_name ? "Procfile has no '#{proc_name}' process, or its line is " \
-                "compound (&&, ||, |, ;) — ask-local cannot inject PORT safely. " \
-                "Run explicitly instead: ask-local run -- <command>" :
-                "Procfile.dev first line is compound (&&, ||, |, ;) or unreadable — " \
-                "ask-local cannot inject PORT safely. Run explicitly instead: " \
-                "ask-local run -- <command>")
-          when :jekyll then %w[bundle exec jekyll serve]
-          when :bridgetown then %w[bin/bridgetown start]
-          when :middleman then %w[bundle exec middleman server]
-          else raise(Error, "No command given and no bootable app detected. Usage: ask-local run -- <command>")
-          end
-        end
-
-        # First process by default; --proc <name> picks a specific line
-        # (the overmind `-P web` convention teams already use).
-        #
-        # Trust boundary: the Procfile line is repo code, so `sh -c` is
-        # safe here the way it would not be for user-supplied input.
+        # Legacy procfile parsing for backwards compat.
         def procfile_command(process = nil)
-          path = File.file?("Procfile.dev") ? "Procfile.dev" : "Procfile"
-          lines = File.readlines(path).map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
-          chosen =
-            if process
-              lines.find { |l| l.start_with?("#{process}:") }
-            else
-              lines.first
-            end
-          return nil unless chosen
-
-          cmd = chosen.split(":", 2).last.to_s.strip
-          # Refuse compound lines we cannot safely inject PORT into.
-          return nil if cmd.match?(/&&|\|\||[|;]/)
-
-          ["sh", "-c", cmd]
+          path = ::Ask::Local::Procfile.find_file(Dir.pwd)
+          return nil unless path
+          lines = ::Ask::Local::Procfile.parse_file(path)
+          line = if process
+                   lines.find { |l| l.name == process }
+                 else
+                   lines.first
+                 end
+          return nil unless line
+          line.compound ? nil : ["sh", "-c", line.command]
         end
 
-        def trap_cleanup(ctx, hostnames)
+        def trap_cleanup(ctx, hostnames, pids = [])
           %w[INT TERM].each do |sig|
             trap(sig) do
               cleanup_routes(ctx, hostnames)
+              pids.each { |pid| Process.kill("TERM", pid) rescue nil }
               exit 0
             end
           end
         end
 
-        # Primary hostname is registered by the runner; secondaries (extra
-        # TLDs) share the same backend. Every hostname gets a backend sidecar
-        # so `ask-local stop` finds the process from any of them, and the
-        # daemon supervisor needs the spec on every hostname.
         def register_all(ctx, hostnames, app, force:, spec: nil)
           hostnames[1..].each do |h|
             ctx.store.add_route(h, app.target, Process.pid, kind: app.kind,
@@ -207,8 +186,6 @@ module Ask
           nil
         end
 
-        # Foreground boot semantics (portless model): leaving = routes gone
-        # AND backend stopped. No orphans on Ctrl+C, TERM, or clean exit.
         def cleanup_routes(ctx, hostnames)
           hostnames.each do |h|
             begin
@@ -225,51 +202,39 @@ module Ask
           end
         end
 
-        # Proxy auto-start. The URL promise is absolute: clean
-        # https://<app>.localhost with no :port suffix, which requires the
-        # proxy on port 443 (or 80 for --no-tls). There is deliberately NO
-        # silent fallback to a high port here — a fallback would boot fine
-        # and hand you https://app.localhost:1355, silently corrupting every
-        # downstream consumer of ASK_LOCAL_URL (OAuth callbacks, mailers,
-        # webhooks). If 443 cannot be bound, this is a hard error pointing
-        # at `ask-local setup`.
-        #
-        # Explicit opt-in is different: `ask-local proxy start -p 1355`
-        # means you asked for a port in the URL, and ASK_LOCAL_URL carries
-        # it faithfully. That path never flows through here.
+        def resolve!(ctx, variant: nil, tld: nil)
+          # The resolver calls Config.load, which raises ConfigError if
+          # config/local.yml is missing — exactly what we want.
+          Ask::Local::Resolver.resolve(Dir.pwd, variant: variant, tld: tld)
+        end
+
         def ensure_proxy!(ctx)
           port = ctx.proxy_port
           tls = ctx.proxy_tls
           if ProxyControl.listening?(port)
             return if ProxyControl.ours?(port, tls: tls)
-
             $stderr.puts "Error: port #{port} is in use by another process."
-            $stderr.puts "  Stop it, or point ask-local elsewhere: ASK_LOCAL_PORT=<free-port> ask-local"
+            $stderr.puts "  Stop it, or ask-local proxy start -p <port>"
             exit 1
           end
-
           privileged = port < 1024 && !ProxyControl.root?
           if privileged && !ctx.interactive?
-            $stderr.puts "Error: proxy is not running and port #{port} needs root to bind."
-            $stderr.puts "  Run this once in a terminal (it handles sudo + service + trust):"
-            $stderr.puts "    ask-local setup"
-            $stderr.puts "  Or start the proxy by hand first:"
-            $stderr.puts "    sudo ask-local proxy start"
+            $stderr.puts "Error: proxy is not running and port #{port} needs root."
+            $stderr.puts "  Run this once: ask-local setup"
+            $stderr.puts "  Or start the proxy by hand: sudo ask-local proxy start"
             exit 1
           end
-          puts "Starting proxy#{privileged ? " (will prompt for sudo to bind port #{port})" : ""}..."
+          puts "Starting proxy#{privileged ? " (sudo)" : ""}..."
           begin
-            ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: privileged)
+            Ask::Local::ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: privileged)
           rescue Ask::Local::ProxyNotRunningError => e
             $stderr.puts "Error: #{e.message.lines.first&.strip}"
-            $stderr.puts "  The proxy could not bind port #{port}. To fix once and for all:"
-            $stderr.puts "    ask-local setup"
+            $stderr.puts "  Fix once: ask-local setup"
             exit 1
           end
         rescue Errno::EACCES
           $stderr.puts "Error: permission denied binding port #{port}."
-          $stderr.puts "  Run this once (it handles sudo + service + trust):"
-          $stderr.puts "    ask-local setup"
+          $stderr.puts "  Fix once: ask-local setup"
           exit 1
         end
       end

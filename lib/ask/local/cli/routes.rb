@@ -19,13 +19,11 @@ module Ask
           raise Error, "Usage: ask-local get <name> [--service s] [--variant v] [--tld t]" unless name
 
           opts = ctx.parse_flags(args[1..] || [], %i[service variant tld])
-          context = Resolver.resolve(Dir.pwd, service: opts[:service],
-            variant: opts[:variant], tlds: opts[:tld], use_branch: false)
+          context = Resolver.resolve(Dir.pwd, variant: opts[:variant])
           hostnames = Hostname.build(
             app: Sanitize.hostname_label(name),
-            service: context.service,
-            variant: context.variant,
-            tlds: context.tlds
+            tlds: Array(context.tld || Ask::Local::Hostname::DEFAULT_TLD),
+            variant: context.variant
           )
           puts Hostname.url(hostnames.first, port: ctx.proxy_port, tls: ctx.proxy_tls)
         end
@@ -206,9 +204,11 @@ module Ask
           end
           payload = {
             app: resolved.app, app_source: resolved.sources[:app],
-            service: resolved.service, service_source: resolved.sources[:service],
+            tld: resolved.tld, tld_source: resolved.sources[:tld],
+            host: resolved.host, host_source: resolved.sources[:host],
             variant: resolved.variant, variant_source: resolved.sources[:variant],
-            tlds: resolved.tlds, urls: urls,
+            urls: urls,
+            processes: resolved.processes.keys,
             framework: Framework.detect(Dir.pwd).to_s
           }
           if json
@@ -217,9 +217,13 @@ module Ask
             return
           end
           puts "app:       #{payload[:app]} (from #{payload[:app_source]})"
-          puts "service:   #{payload[:service] || "web (default, bare)"} (from #{payload[:service_source] || "default"})"
-          puts "variant:   #{payload[:variant] || "(none)"} (from #{payload[:variant_source] || "no worktree, branch, flag, or env"})"
-          puts "tlds:      #{payload[:tlds].join(", ")}"
+          if payload[:host]
+            puts "host:      #{payload[:host]} (from #{payload[:host_source]})"
+          else
+            puts "tld:       #{payload[:tld]} (from #{payload[:tld_source]})"
+          end
+          puts "variant:   #{payload[:variant] || "(none)"} (from #{payload[:variant_source] || "no overlay file, flag, or env"})"
+          puts "processes: #{payload[:processes].join(", ")}"
           puts "urls:"
           urls.each { |u| puts "  #{u}" }
           puts "framework: #{payload[:framework]}"
@@ -231,10 +235,10 @@ module Ask
           url =
             if name
               opts = ctx.parse_flags(args[1..] || [], %i[service variant tld])
-              context = Resolver.resolve(Dir.pwd, service: opts[:service],
-                variant: opts[:variant], tlds: opts[:tld], use_branch: false)
+              context = Resolver.resolve(Dir.pwd, variant: opts[:variant], tld: opts[:tld])
               hostnames = Hostname.build(app: Sanitize.hostname_label(name),
-                service: context.service, variant: context.variant, tlds: context.tlds)
+                tlds: Array(context.tld || Ask::Local::Hostname::DEFAULT_TLD),
+                variant: context.variant)
               Hostname.url(hostnames.first, port: ctx.proxy_port, tls: ctx.proxy_tls)
             else
               resolved = Resolver.resolve(Dir.pwd)

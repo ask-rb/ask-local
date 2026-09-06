@@ -2,124 +2,92 @@
 
 module Ask
   module Local
-    # Resolve the effective {app, service, variant, tlds} for a directory.
-    #
-    # Precedence per axis: CLI flag > ENV > ask-local.json > inference.
-    # Variant adds linked-worktree branch and opt-in current branch.
+    # Resolve hostnames from config/local.yml — the ONLY source of truth.
+    # No inference, no Procfile fallback, no ENV for naming. If the file
+    # is missing, resolve raises ConfigError telling the user to run
+    # `ask-local init`.
     module Resolver
       module_function
 
-      Result = Struct.new(:app, :service, :variant, :tlds, :sources, keyword_init: true)
+      Result = Struct.new(:app, :tld, :host, :processes, :secrets,
+        :sources, :variant, keyword_init: true)
 
-      def resolve(dir = Dir.pwd, name: nil, service: nil, variant: nil,
-        tlds: nil, use_branch: false)
-        config, config_dir = find_config(dir)
-        app_cfg = config ? config.app_config(dir) : {}
-        config_source = config_dir ? "ask-local.json (#{relative_label(config_dir, dir)})" : "ask-local.json"
+      def resolve(dir = Dir.pwd, variant: nil, tld: nil, host: nil)
+        config = Config.load(dir, variant: variant)
+        unless config
+          raise ConfigError, Config.missing_message(dir)
+        end
 
-        app, app_source = first_present(
-          [name, "flag"],
-          [ENV["ASK_LOCAL_NAME"], "ASK_LOCAL_NAME"],
-          [app_cfg["name"], config_source],
-          [Inference.infer(dir), :infer]
-        )
-        app, app_source = app_source == :infer ? app : [app, app_source]
+        service = config.service
+        proxy = config.proxy_config
+        processes = config.processes
 
-        service, service_source = first_present(
-          [service, "flag"],
-          [ENV["ASK_LOCAL_SERVICE"], "ASK_LOCAL_SERVICE"],
-          [app_cfg["service"], config_source]
-        )
+        variant_name = (variant || ENV["ASK_LOCAL_VARIANT"])&.strip
+        variant_name = nil if variant_name&.empty?
 
-        variant_value, variant_source = if !variant.nil? || ENV["ASK_LOCAL_VARIANT"] || app_cfg["variant"]
-          first_present(
-            [variant, "flag"],
-            [ENV["ASK_LOCAL_VARIANT"], "ASK_LOCAL_VARIANT"],
-            [app_cfg["variant"], config_source]
-          )
+        # host or tld: config proxy.host wins over proxy.tld; flags override.
+        if host || proxy["host"]
+          effective_host = (host || proxy["host"]).to_s.strip.downcase
+          effective_tld = nil
         else
-          Variant.resolve(dir, use_branch: use_branch) || [nil, nil]
+          effective_tld = (tld || proxy["tld"] || Hostname::DEFAULT_TLD).to_s.strip.downcase
+          effective_tld = effective_tld.gsub(/\A\./, "")
+          unless Sanitize.valid_tld?(effective_tld)
+            raise ConfigError, "Invalid tld #{effective_tld.inspect} in #{config.path} proxy.tld"
+          end
+          effective_host = nil
         end
 
-        tld_list = parse_tlds(tlds) || parse_tlds(ENV["ASK_LOCAL_TLD"]) ||
-          Array(app_cfg["tlds"]) || [Hostname::DEFAULT_TLD]
-        tld_list = [Hostname::DEFAULT_TLD] if tld_list.empty?
-        tld_list.each do |tld|
-          raise ConfigError, "Invalid TLD #{tld.inspect}" unless Sanitize.valid_tld?(tld.downcase)
-        end
-        tld_list = tld_list.map(&:downcase).uniq
+        sources = {
+          app: config.path.to_s,
+          tld: proxy["tld"] ? "#{config.path} proxy.tld" : "default (localhost)",
+          host: proxy["host"] ? "#{config.path} proxy.host" : nil,
+          variant: variant_name ? "config/local.#{variant_name}.yml" : nil
+        }
 
         Result.new(
-          app: Sanitize.hostname_label(app),
-          service: service && Sanitize.hostname_label(service),
-          variant: variant_value && Sanitize.hostname_label(variant_value),
-          tlds: tld_list,
-          sources: { app: app_source, service: service_source, variant: variant_source }
+          app: Sanitize.hostname_label(service),
+          tld: effective_tld,
+          host: effective_host,
+          processes: processes,
+          secrets: config.secrets,
+          sources: sources,
+          variant: variant_name
         )
       end
 
+      # Hostname for one process: primary (first proxy:true) is bare;
+      # others are proc.app.tld; proxy:false have none.
+      def hostname_for(result, proc_name)
+        entry = result.processes[proc_name]
+        return nil unless entry
+        return nil if entry["proxy"] == false
+
+        base = result.host ? result.host : "#{result.app}.#{result.tld}"
+        proc_name.to_s == primary_proc(result) ? base : "#{proc_name}.#{base}"
+      end
+
+      def primary_proc(result)
+        result.processes.find { |_, v| v["proxy"] != false }&.first
+      end
+
+      # All HTTP hostnames (for route registration / doctor).
       def hostnames(result)
-        Hostname.build(app: result.app, service: result.service,
-          variant: result.variant, tlds: result.tlds)
+        result.processes.filter_map { |name, entry|
+          next if entry["proxy"] == false
+
+          hostname_for(result, name)
+        }
       end
 
-      # Walk up for the nearest ask-local.json; a root with an "apps" map
-      # covers subdirectories (monorepo). A nearer config without a match
-      # does not block a farther one with an apps entry.
-      def find_config(dir)
-        current = File.expand_path(dir)
-        fallback = nil
-        loop do
-          begin
-            loaded = Config.load(current)
-            if loaded
-              if loaded.data["apps"].is_a?(Hash)
-                return [loaded, current]
-              else
-                fallback ||= [loaded, current]
-              end
-            end
-          rescue ConfigError
-            nil
-          end
-          parent = File.dirname(current)
-          break if parent == current
-
-          current = parent
-        end
-        fallback || [nil, nil]
+      def url_for(result, proc_name, port:, tls:)
+        host = hostname_for(result, proc_name)
+        host && Hostname.url(host, port: port, tls: tls)
       end
 
-      def relative_label(config_dir, dir)
-        return "." if File.expand_path(config_dir) == File.expand_path(dir)
-
-        require "pathname"
-        Pathname.new(File.expand_path(dir))
-          .relative_path_from(Pathname.new(File.expand_path(config_dir))).to_s
-      rescue ArgumentError
-        "."
-      end
-
-      # NOTE: no `private` keyword here — it would cancel
-      # `module_function` mode (see Variant for details).
-      def first_present(*pairs)
-        pairs.each do |value, source|
-          if source == :infer
-            inferred, from = value
-            return [inferred, from] unless inferred.nil? || inferred.to_s.empty?
-          elsif !value.nil? && !value.to_s.strip.empty?
-            return [value.to_s.strip, source]
-          end
-        end
-        [nil, nil]
-      end
-
-      def parse_tlds(value)
-        return nil if value.nil?
-        return value.map(&:to_s) if value.is_a?(Array)
-
-        parts = value.to_s.split(",").map(&:strip).reject(&:empty?)
-        parts.empty? ? nil : parts
+      # Effective URL list for display (status): primary bare, others prefixed.
+      def urls(result, port:, tls:)
+        hostnames(result).map { |h| Hostname.url(h, port: port, tls: tls) }
       end
     end
   end
