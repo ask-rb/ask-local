@@ -263,6 +263,217 @@ module Ask
           end
         end
 
+        # One-shot workstation setup: everything needed for clean
+        # https://<app>.localhost URLs, in order, with a clear fix-it
+        # message on the first failure. Run this once per machine:
+        #
+        #   ask-local setup
+        #
+        # Steps: trust the local CA -> ensure the proxy serves port 443
+        # (root service when possible, sudo daemon otherwise) -> sync
+        # /etc/hosts -> verify with doctor. After this, plain `ask-local`
+        # in any app dir just works with no :port suffix, ever.
+        def setup(ctx, args)
+          if args.include?("--help") || args.include?("-h")
+            puts <<~HELP
+              Usage: ask-local setup [--no-service]
+
+              One-shot workstation setup for clean https://<app>.localhost URLs:
+
+                1. Trust the local CA (no more browser warnings)
+                2. Serve port 443 (root service at boot, or sudo daemon now)
+                3. Sync /etc/hosts (Safari + custom TLDs)
+                4. Verify everything with doctor
+
+              --no-service skips the root service and starts a sudo daemon
+              instead (no boot persistence; good for ephemeral machines).
+            HELP
+            return
+          end
+
+          step("1/4 Trusting local CA") do
+            result = Ask::Local::Trust.trust
+            unless result[:trusted]
+              abort_setup("CA trust failed: #{result[:error]}",
+                "Run `ask-local trust` manually to see the underlying error,",
+                "then re-run `ask-local setup`.")
+            end
+          end
+
+          unless args.include?("--no-service")
+            step("2/4 Installing proxy service on port 443") do
+              unless ensure_root_service(ctx)
+                abort_setup("Could not install the proxy service.",
+                  "Fallback: `ask-local setup --no-service` for a sudo daemon",
+                  "without boot persistence.")
+              end
+            end
+          else
+            step("2/4 Starting proxy sudo daemon on port 443") do
+              unless ensure_sudo_daemon(ctx)
+                abort_setup("Could not start the proxy daemon on port 443.",
+                  "Check the log, then re-run `ask-local setup`.")
+              end
+            end
+          end
+
+          step("3/4 Syncing /etc/hosts") do
+            hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
+            unless Ask::Local::Hosts.sync(hostnames)
+              abort_setup("Could not write /etc/hosts.",
+                "Run `sudo ask-local hosts sync`, then re-run `ask-local setup`.")
+            end
+          end
+
+          step("4/4 Verifying with doctor") do
+            failed = Doctor.print(Doctor.run(store: ctx.store), out: $stdout)
+            if failed.zero?
+              puts "\nSetup complete: https://<app>.localhost URLs are ready."
+              puts "Try it: cd ~/code/myapp && ask-local"
+            else
+              abort_setup("Doctor reports #{failed} failing check(s) (see above).",
+                "Fix the reported issues, then re-run `ask-local setup`.")
+            end
+          end
+        end
+
+        def step(label)
+          puts "\n==> #{label}..."
+          yield
+          puts "    ok"
+        end
+
+        def abort_setup(problem, *fixes)
+          $stderr.puts "\nSetup failed: #{problem}"
+          fixes.each { |f| $stderr.puts "  #{f}" }
+          exit 1
+        end
+
+        # Install the root service (boot-persistent). Returns true when a
+        # proxy is up on 443 afterwards, false otherwise. Never falls back
+        # to a high port silently: a :port suffix in URLs would corrupt the
+        # stable-URL promise, so failure here is a hard error with guidance.
+        def ensure_root_service(ctx)
+          service_install(ctx, [])
+          wait_for_ours(ctx, 443, tls: true)
+        rescue Error, SystemCallError => e
+          warn "    service install failed: #{e.message}"
+          false
+        end
+
+        # Sudo daemon for 443 without boot persistence (--no-service).
+        def ensure_sudo_daemon(ctx)
+          port, tls = 443, true
+          unless ctx.interactive?
+            warn "    no TTY available for the sudo prompt."
+            return false
+          end
+          ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: true)
+          wait_for_ours(ctx, port, tls: tls)
+        rescue Ask::Local::ProxyNotRunningError, SystemCallError => e
+          warn "    daemon start failed: #{e.message.lines.first&.strip}"
+          false
+        end
+
+        def wait_for_ours(ctx, port, tls:, timeout: 20)
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+          until ProxyControl.ours?(port, tls: tls)
+            return false if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+            sleep 0.5
+          end
+          true
+        end
+
+        # ask-local start — one-setup-and-go: idempotent workstation setup
+        # (trust, 443, hosts) when doctor fails, then boots the app in the
+        # current directory. The single command you run day-to-day; existing
+        # bare `ask-local` keeps working via BootCommand.run_inferred, and
+        # `setup` stays for explicit re-setup.
+        def start(ctx, args)
+          if args.include?("--help") || args.include?("-h")
+            puts <<~HELP
+              Usage: ask-local start [name] [cmd...] [options]
+
+              One-setup-and-go: if the workstation isn't ready (CA, proxy,
+              hosts), runs the minimal needed setup first, then boots the
+              app in the current directory.
+
+                ask-local start              # infer name, boot -> https://<app>.localhost
+                ask-local start myapp       # explicit name
+                ask-local start -- --help   # pass --help to the app, not here
+
+              Options are passed through to the boot path:
+                --name <name> --service <svc> --variant <v> --tld <tld> --branch
+
+              Setup failures become hard errors pointing at `ask-local setup`;
+              non-interactive CI without a running proxy exits immediately.
+            HELP
+            return
+          end
+
+          # Fast path: every doctor check passes => skip setup entirely.
+          # This makes `start` as fast as `ask-local` on a ready machine.
+          if needs_workstation_setup?(ctx)
+            ensure_workstation!(ctx)
+          end
+          BootCommand.run_inferred(ctx, args)
+        end
+
+        def needs_workstation_setup?(ctx)
+          Ask::Local::Doctor.run(store: ctx.store).any? { |c| !c.ok }
+        end
+
+
+        # Quiet workstation setup for `start`: trust the CA, ensure a proxy
+        # on 443 (root service, sudo daemon fallback), and sync hosts.
+        # Each step is idempotent; only missing pieces run. Non-interactive
+        # CI without a proxy fails fast rather than prompting for sudo.
+        def ensure_workstation!(ctx)
+          # 1. CA
+          unless Ask::Local::Certs.trusted?(ctx.store.dir)
+            result = Ask::Local::Trust.trust
+            unless result[:trusted]
+              abort_setup("CA trust failed: #{result[:error]}",
+                "Run `ask-local setup` in a terminal (handles trust + service),",
+                "then re-run `ask-local start`.")
+            end
+          end
+
+          # 2. Proxy on 443
+          port = 443
+          tls = true
+          unless Ask::Local::ProxyControl.listening?(port) && ProxyControl.ours?(port, tls: tls)
+            if port < 1024 && !Ask::Local::ProxyControl.root? && !ctx.interactive?
+              abort_setup("Proxy is not running and port 443 needs root to bind.",
+                "Run this once in a terminal: ask-local setup")
+            end
+            ok =
+              if ProxyControl.root?
+                Ask::Local::CLI::SystemCommand.ensure_root_service(ctx)
+              elsif ctx.interactive?
+                begin
+                  Ask::Local::ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: true)
+                  wait_for_ours(ctx, port, tls: tls)
+                rescue Ask::Local::ProxyNotRunningError, SystemCallError => e
+                  warn "    daemon start failed: #{e.message.lines.first&.strip}"
+                  false
+                end
+              else
+                false
+              end
+            unless ok
+              abort_setup("Proxy is not running and could not be started on port 443.",
+                "Run `ask-local setup` in a terminal (it handles trust + service + hosts),",
+                "then re-run `ask-local start`.")
+            end
+          end
+
+          # 3. Hosts (best-effort: only needed for Safari; warn, don't fail)
+          unless Hosts.sync(ctx.store.load_routes.map { |r| r["hostname"] })
+            warn "Warning: could not write /etc/hosts (try sudo ask-local hosts sync)."
+          end
+        end
         # ask-local kamal <variant> [--app myapp] [--domain preview.example.com]
         def kamal(_ctx, args)
           opts = {}
@@ -273,11 +484,13 @@ module Ask
             case a[i]
             when "--app" then opts[:app] = a.fetch(i + 1); i += 2
             when "--domain" then opts[:domain] = a.fetch(i + 1); i += 2
+            when "--tld" then opts[:tld] = a.fetch(i + 1); i += 2
             else rest << a[i]; i += 1
             end
           end
           variant = rest.first
-          raise Error, "Usage: ask-local kamal <variant> [--app myapp] [--domain preview.example.com]" unless variant
+          raise Error, "Usage: ask-local kamal <variant> [--app myapp] [--domain preview.example.com] [--tld <tld>]" unless variant
+          tld = opts[:tld] || ENV["ASK_LOCAL_TLD"]&.split(",")&.first || "localhost"
 
           app = opts[:app] || Resolver.resolve(Dir.pwd, use_branch: false).app
           domain = opts[:domain] || ENV["ASK_LOCAL_KAMAL_DOMAIN"] || "preview.example.com"
@@ -287,6 +500,7 @@ module Ask
           puts "  ssl: true"
           puts "  hosts:"
           puts "    - #{app}-#{slug}.#{domain}"
+          puts "  # Prefer Kamal multi-host for production; single-host preview above is fine for ephemeral branches."
         end
       end
     end

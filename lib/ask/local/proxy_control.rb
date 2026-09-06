@@ -64,36 +64,61 @@ module Ask
       # where only one family answers the check must still succeed.
       # An explicit regression test pins this (health_test pinning
       # ensure_proxy's "is that ours" logic against future proxy changes).
+      #
+      # Probe order matters: plain HTTP first (our proxy byte-peeks and
+      # answers plain HTTP even on the TLS port), TLS second. A TLS-first
+      # handshake against a foreign plain-HTTP server blocks in connect
+      # waiting for a ServerHello that never comes — and connect used to
+      # sit outside the timeout, hanging ensure_proxy for over a minute.
+      #
+      # Speed: if the plain probe gets ANY HTTP response without our
+      # header, the server is definitively foreign — no TLS retry. The
+      # slow TLS retry only happens when plain yielded zero bytes
+      # (connection error, EOF, or timeout against a silent server).
       def ours?(port, tls:)
-        probe_ours(port, tls: tls, host: "127.0.0.1") ||
-          probe_ours(port, tls: tls, host: "::1")
+        ["127.0.0.1", "::1"].any? do |host|
+          case probe_once(port, tls: false, host: host)
+          when :ours then true
+          when :foreign then false
+          else tls ? probe_once(port, tls: true, host: host) == :ours : false
+          end
+        end
       end
 
-      def probe_ours(port, tls:, host:)
-        sock = TCPSocket.new(host, port)
-        if tls
-          ctx = OpenSSL::SSL::SSLContext.new
-          ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
-          sock = OpenSSL::SSL::SSLSocket.new(sock, ctx)
-          sock.connect
-        end
-        Timeout.timeout(3) do
+      # Three outcomes: :ours (our header present), :foreign (an HTTP
+      # response without it), :unknown (no response at all).
+      def probe_once(port, tls:, host:)
+        sock = nil
+        Timeout.timeout(5) do
+          sock = TCPSocket.new(host, port)
+          if tls
+            ctx = OpenSSL::SSL::SSLContext.new
+            ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+            sock = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+            sock.connect
+          end
           sock.write("GET / HTTP/1.1\r\nHost: ask-local-health.invalid\r\nConnection: close\r\n\r\n")
           head = +""
           while (chunk = sock.readpartial(4096))
             head << chunk
             break if head.include?("\r\n\r\n")
           end
-          head.downcase.include?("x-ask-local: 1")
+          return :unknown if head.empty?
+
+          return head.downcase.include?("x-ask-local: 1") ? :ours : :foreign
         end
       rescue SystemCallError, OpenSSL::SSL::SSLError, Timeout::Error, IOError, EOFError
-        false
+        :unknown
       ensure
         begin
           sock&.close
         rescue StandardError
           nil
         end
+      end
+
+      def probe_ours(port, tls:, host:)
+        probe_once(port, tls: tls, host: host) == :ours
       end
 
       def pid_alive?(pid)

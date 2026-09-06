@@ -11,7 +11,7 @@ module Ask
     # In non-interactive environments (no TTY or CI=1) we fail early with
     # a clear message instead of prompting (portless lesson).
     class CLI
-      SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service kamal stop restart log status open].freeze
+      SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service kamal stop restart log status open setup start].freeze
 
       def self.run(argv)
         new.run(argv)
@@ -44,7 +44,8 @@ module Ask
         when "prune" then RoutesCommand.prune(ctx, args)
         when "proxy" then SystemCommand.proxy(ctx, args)
         when "service" then SystemCommand.service(ctx, args)
-        when "kamal" then SystemCommand.kamal(ctx, args)
+        when "setup" then SystemCommand.setup(ctx, args)
+                when "kamal" then SystemCommand.kamal(ctx, args)
         when "stop"
           exit RoutesCommand.stop(ctx, args)
         when "restart" then RoutesCommand.restart(ctx, args)
@@ -64,7 +65,9 @@ module Ask
           ask-local - Stable named .localhost URLs for Ruby development.
 
           Usage:
-            ask-local                        Infer name, boot app -> https://<app>.localhost
+            ask-local start [name] [cmd...]  One-setup-and-go: setup if needed, then boot -> https://<app>.localhost
+            ask-local setup                One-shot workstation setup without booting (run once)
+            ask-local                        Bare form of `start` -> https://<app>.localhost
             ask-local run [cmd]              Same, with explicit command
             ask-local <name> <cmd>           Run with explicit name
             ask-local get <name>             Print URL for a service

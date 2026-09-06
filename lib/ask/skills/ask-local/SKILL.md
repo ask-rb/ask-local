@@ -7,6 +7,14 @@ description: Run Ruby apps through ask-local for stable named .localhost URLs (e
 
 Never invent ports. Never parse them from logs. Every app has a stable URL.
 
+First time on a machine, run `ask-local start` in any app dir — it does
+the one-shot CA trust, port 443, and hosts sync if anything is missing,
+then boots. Prefer `ask-local setup` for
+workstation setup without booting. Every later `ask-local` or
+hosts, verify). If any command fails with a privileged-port error, do
+not work around it with `-p` — run `ask-local setup` instead. A `:port`
+suffix in a URL means someone explicitly opted into it.
+
 ## Booting apps
 
 ```bash

@@ -225,28 +225,51 @@ module Ask
           end
         end
 
+        # Proxy auto-start. The URL promise is absolute: clean
+        # https://<app>.localhost with no :port suffix, which requires the
+        # proxy on port 443 (or 80 for --no-tls). There is deliberately NO
+        # silent fallback to a high port here — a fallback would boot fine
+        # and hand you https://app.localhost:1355, silently corrupting every
+        # downstream consumer of ASK_LOCAL_URL (OAuth callbacks, mailers,
+        # webhooks). If 443 cannot be bound, this is a hard error pointing
+        # at `ask-local setup`.
+        #
+        # Explicit opt-in is different: `ask-local proxy start -p 1355`
+        # means you asked for a port in the URL, and ASK_LOCAL_URL carries
+        # it faithfully. That path never flows through here.
         def ensure_proxy!(ctx)
           port = ctx.proxy_port
           tls = ctx.proxy_tls
           if ProxyControl.listening?(port)
-            if ProxyControl.ours?(port, tls: tls)
-              return
-            end
+            return if ProxyControl.ours?(port, tls: tls)
 
             $stderr.puts "Error: port #{port} is in use by another process."
+            $stderr.puts "  Stop it, or point ask-local elsewhere: ASK_LOCAL_PORT=<free-port> ask-local"
+            exit 1
           end
 
           privileged = port < 1024 && !ProxyControl.root?
           if privileged && !ctx.interactive?
-            $stderr.puts "Proxy is not running and no TTY is available for sudo."
-            $stderr.puts "Start it in a terminal: ask-local proxy start"
-            $stderr.puts "Or use an unprivileged port: ask-local proxy start -p 1355"
+            $stderr.puts "Error: proxy is not running and port #{port} needs root to bind."
+            $stderr.puts "  Run this once in a terminal (it handles sudo + service + trust):"
+            $stderr.puts "    ask-local setup"
+            $stderr.puts "  Or start the proxy by hand first:"
+            $stderr.puts "    sudo ask-local proxy start"
             exit 1
           end
           puts "Starting proxy#{privileged ? " (will prompt for sudo to bind port #{port})" : ""}..."
-          ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: privileged)
+          begin
+            ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: privileged)
+          rescue Ask::Local::ProxyNotRunningError => e
+            $stderr.puts "Error: #{e.message.lines.first&.strip}"
+            $stderr.puts "  The proxy could not bind port #{port}. To fix once and for all:"
+            $stderr.puts "    ask-local setup"
+            exit 1
+          end
         rescue Errno::EACCES
-          $stderr.puts "Error: could not bind port #{port}. Try: ask-local proxy start -p 1355"
+          $stderr.puts "Error: permission denied binding port #{port}."
+          $stderr.puts "  Run this once (it handles sudo + service + trust):"
+          $stderr.puts "    ask-local setup"
           exit 1
         end
       end

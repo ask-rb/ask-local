@@ -8,9 +8,25 @@ Zero runtime dependencies — Ruby stdlib only (`openssl`, `socket`).
 
 ```bash
 gem install ask-local
+# Interactive shortcut: `askl` is the same binary (shell-friendly alias).
+# Keep `ask-local` in logs and docs so `grep` stays useful.
+ask-local start          # setup + boot in one go (or plain `ask-local`)
+ask-local setup          # once per machine: CA trust + port 443 + hosts + verify
 cd ~/code/myapp && ask-local
 # -> https://myapp.localhost
 ```
+
+## The no-fallback promise
+
+ask-local never silently degrades to a `:<port>` URL. Clean
+`https://<app>.localhost` requires the proxy on port 443; if 443
+cannot be bound, you get a hard error pointing at `ask-local setup`
+— never a booted app on `https://app.localhost:1355` that silently
+poisons OAuth callbacks, mailer hosts, and webhooks downstream.
+
+The only port-suffixed URLs are the ones you explicitly ask for:
+`ask-local proxy start -p 1355` (CI/sandboxes where 443 is impossible).
+There the suffix is honest, and `ASK_LOCAL_URL` carries it faithfully.
 
 ## How it works
 
@@ -189,6 +205,19 @@ supervision, skills). puma-dev's semantics were ported, not its binary.
 bundle install
 bundle exec rake test
 ```
+
+## Non-goals (deliberate)
+
+- **HTTP/2.** Ruby dev servers serve a handful of requests, not Vite's
+  hundreds of unbundled files — the multiplexing win doesn't apply, and
+  ALPN/HPACK/stream state would triple the proxy's auditable surface.
+- **LAN/mDNS or tunneled sharing.** mDNS behaves differently on every
+  network; third-party tunnels need CLIs, auth state, and accounts.
+  The `kamal` preview-deploy snippet covers "show this branch to
+  someone" on real infrastructure instead.
+- **Production serving.** The proxy binds loopback only, the CA is
+  self-signed, and there is no buffering or rate limiting.
+
 
 The `ask-local-apps` fixture fleet (sibling checkout) exercises
 detection, inference, and boot across Rails variants, Roda, Sinatra,

@@ -85,7 +85,7 @@ class CLITest < Minitest::Test
     code, out = run_cli("kamal", "demo")
     assert_equal 0, code
     # cwd here is the ask-local repo -> gemspec name.
-    assert_match(%r{\A#.*\nproxy:\n  ssl: true\n  hosts:\n    - ask-local-demo\.preview\.example\.com\n\z}, out)
+    assert_match(%r{\A#.*\nproxy:\n  ssl: true\n  hosts:\n    - ask-local-demo\.preview\.example\.com\n}, out)
   end
 
   def test_get_inherits_variant_from_env

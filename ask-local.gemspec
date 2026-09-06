@@ -22,9 +22,9 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/master/CHANGELOG.md"
 
-  spec.files = Dir["lib/**/*", "bin/ask-local", "LICENSE", "README.md", "CHANGELOG.md"]
+  spec.files = Dir["lib/**/*", "bin/ask-local", "bin/askl", "LICENSE", "README.md", "CHANGELOG.md"]
   spec.bindir = "bin"
-  spec.executables = ["ask-local"]
+  spec.executables = %w[ask-local askl]
   spec.require_paths = ["lib"]
 
   # Intentionally near-zero runtime dependencies: proxy, TLS, and process

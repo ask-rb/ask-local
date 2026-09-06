@@ -53,6 +53,17 @@
 - Chunked request uploads pinned by test (streamed intact,
   close-delimited).
 - README non-goals section (HTTP/2, tunnels, production) with rationale.
+- `ask-local start`: one-setup-and-go entry point (setup-if-needed, then boot).
+  `ask-local` bare stays as an alias for it; `ask-local setup` stays for explicit re-setup.
+- `ask-local setup`: one-shot workstation setup (CA trust, port 443 via
+  root service or sudo daemon, hosts sync, doctor verify) with a clear
+  fix-it message on the first failure.
+- No silent port fallback: privileged bind failure is a hard error
+  pointing at `ask-local setup`, never a degraded `:1355` URL.
+- Health probe tries plain HTTP before TLS (a TLS handshake against a
+  foreign plain-HTTP server blocked in connect outside any timeout);
+  responding foreign servers classify instantly, silent ones after the
+  timeout rather than hanging forever.
 - DNS-rebinding boundary: foreign Hosts get a bare 404; only our own
   TLDs see the route-listing 404. Proxy takes `--tld` (persisted) so the
   boundary follows custom domains.
