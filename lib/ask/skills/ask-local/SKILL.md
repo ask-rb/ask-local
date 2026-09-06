@@ -28,8 +28,9 @@ env:
 ```
 
 If the file is missing, ask-local prints `Run ask-local init`. Generate it
-with `ask-local init` (migrates an existing Procfile) or in Rails via
-`rails generate ask_local:install`.
+with `ask-local init` (migrates an existing Procfile). Rails apps need
+no extra gem — the proxied hostname is allowed automatically via
+`RAILS_DEVELOPMENT_HOSTS`.
 
 ```bash
 ask-local start          # setup if needed, then boot every process

@@ -47,7 +47,8 @@ processes:
 ```
 
 `ask-local init` creates the file (migrating an existing Procfile);
-Rails apps get it via `rails generate ask_local:install`. `ask-local`
+Rails apps need no extra gem — ask-local injects `RAILS_DEVELOPMENT_HOSTS`
+so the proxied hostname is allowed automatically. `ask-local`
 then boots every process, assigns each a `$PORT`, injects
 `ASK_LOCAL_URL`, registers routes for HTTP processes, supervises the
 whole tree, and cleans up when one exits.
@@ -129,7 +130,7 @@ Procfile lines that are compound (`&&`, `||`, `|`, `;`) are refused with
 guidance rather than silently mis-injected.
 
 For Rails integration (hosts, Action Cable origins, Procfile rewrite,
-generators), see `ask-local-rails`.
+generators) — deprecated; core covers Rails now.
 
 ## WebSockets
 
@@ -168,7 +169,7 @@ Run-mode (TCP) routes and static aliases are never supervised.
 
 | Gem | How ask-local helps |
 |---|---|
-| `ask-rails` | `ask_local:install` equivalent wiring: `config.hosts` patterns, `allowed_request_origins` for Cable, mailer/OmniAuth hosts from `ASK_LOCAL_URL` |
+| `ask-rails` | ask-local core injects `RAILS_DEVELOPMENT_HOSTS`; Cable origins + helpers live in the deprecated ask-local-rails |
 | `ask-rails-harness` | Its 9 Rails tools (routes, models, DB, logs) run against the app the proxy serves; `DevUrl` gives the agent the stable URL instead of a guessed port |
 | `ask-app-server` | The JSON-RPC/stdio session host sits behind `https://api.<app>.localhost`; editor/IDE clients use `ask-local get` output |
 | `ask-mcp` | MCP servers get named URLs per service (`mcp.<app>.localhost`), no port coordination across servers |
