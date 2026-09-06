@@ -81,8 +81,11 @@ module Ask
 
             port = opts[:app_port] || Ports.find_free
             shell_cmd = ["sh", "-c", cmd]
+            # Always allow the proxied hostname in Rails dev (Rails ignores
+            # this env var when not a Rails app — safe for every framework).
             app = runner.boot_run(name: proc_name, hostname: hostname, url: url,
-              dir: Dir.pwd, command: shell_cmd, port: port, force: opts[:force])
+              dir: Dir.pwd, command: shell_cmd, port: port, force: opts[:force],
+              rails_dev_host: hostname)
             register_all(ctx, hostnames, app, force: opts[:force],
               spec: { "dir" => File.expand_path(Dir.pwd), "proc" => proc_name })
             routes_registered << { hostnames: hostnames, app: app }

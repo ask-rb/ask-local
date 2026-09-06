@@ -177,3 +177,43 @@ class ProxyHardeningTest < Minitest::Test
     server&.close
   end
 end
+
+class RailsDevHostTest < Minitest::Test
+  def test_child_env_sets_rails_development_hosts
+    dir = Dir.mktmpdir
+    store = Ask::Local::RouteStore.new(dir)
+    runner = Ask::Local::Runner.new(store: store, on_log: ->(_m) {})
+    env = runner.send(:child_env, dir, url: "https://myapp.localhost",
+      port: 4001, rails_dev_host: "myapp.localhost")
+    assert_equal "myapp.localhost", env["RAILS_DEVELOPMENT_HOSTS"]
+    assert_equal "https://myapp.localhost", env["ASK_LOCAL_URL"]
+    assert_equal "4001", env["PORT"]
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_child_env_without_rails_dev_host_sets_nothing
+    dir = Dir.mktmpdir
+    store = Ask::Local::RouteStore.new(dir)
+    runner = Ask::Local::Runner.new(store: store, on_log: ->(_m) {})
+    env = runner.send(:child_env, dir, url: "http://x.localhost", port: 4001)
+    refute env.key?("RAILS_DEVELOPMENT_HOSTS")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_boot_run_forwards_rails_dev_host
+    dir = Dir.mktmpdir
+    store = Ask::Local::RouteStore.new(dir)
+    runner = Ask::Local::Runner.new(store: store, on_log: ->(_m) {})
+    app = runner.boot_run(name: "web", hostname: "myapp.localhost",
+      url: "http://myapp.localhost:4001", dir: dir,
+      command: ["sh", "-c", "exit 0"], port: 4001,
+      rails_dev_host: "myapp.localhost")
+    assert_equal "myapp.localhost", app.hostname
+    # The route is registered with the store.
+    assert store.find("myapp.localhost")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+end

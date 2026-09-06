@@ -91,9 +91,10 @@ module Ask
       end
 
       # Run an arbitrary command with PORT + ASK_LOCAL_URL. Returns App.
-      def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false)
+      def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
+        rails_dev_host: nil)
         port ||= Ports.find_free
-        env = child_env(dir, url: url, port: port)
+        env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host)
         pid = with_clean_env { spawn(env, *command, chdir: dir) }
         Process.detach(pid)
         target = "127.0.0.1:#{port}"
@@ -103,12 +104,16 @@ module Ask
           target: target, kind: "tcp", command: command)
       end
 
-      def child_env(dir, url:, port:)
+      def child_env(dir, url:, port:, rails_dev_host: nil)
         env = { "ASK_LOCAL_URL" => url }
         env["PORT"] = port.to_s if port
         env["HOST"] = "127.0.0.1"
         ca = File.join(Certs.state_dir, "ca.pem")
         env["NODE_EXTRA_CA_CERTS"] = ca if File.file?(ca)
+        # Rails blocks unknown Host headers in development. Allow the
+        # proxied hostname so Rails apps boot behind ask-local with zero
+        # config — this replaces the ask-local-rails hosts patch.
+        env["RAILS_DEVELOPMENT_HOSTS"] = rails_dev_host if rails_dev_host
         env
       end
 
